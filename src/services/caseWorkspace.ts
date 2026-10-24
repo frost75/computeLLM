@@ -10,6 +10,7 @@ import { automaticOrder } from "../domain/automation";
 import { materializeSnapshot } from "../domain/settlement";
 import type { Recognition } from "../domain/contracts";
 import { reviewCase, applyReview } from "./aiReview";
+import { answerCaseQuestion, createCaseChatContext } from "./caseChat";
 type Side = "original" | "current";
 type Repository = {
   save(r: CaseFile): Promise<unknown>;
@@ -37,6 +38,7 @@ export class CaseWorkspace {
   records = new Map<string, CaseFile>();
   activities = new Map<string, CaseActivity>();
   private listeners = new Set<() => void>();
+  private chatRequests = new Map<string, Job>();
   constructor(
     private repo: Repository,
     private recognize: (
@@ -46,6 +48,7 @@ export class CaseWorkspace {
       signal: AbortSignal,
     ) => Promise<Recognition>,
     private reviewer = reviewCase,
+    private chatAnswer = answerCaseQuestion,
   ) {}
   subscribe(fn: () => void) {
     this.listeners.add(fn);
@@ -65,6 +68,7 @@ export class CaseWorkspace {
         (!s.original &&
           !s.current &&
           !s.review &&
+          !this.caseChatBusy(r.id) &&
           r.updatedAt > local.updatedAt)
       ) {
         const draft = materializeSnapshot(r.draft);
@@ -92,6 +96,120 @@ export class CaseWorkspace {
   }
   activity(id: string) {
     return this.activities.get(id) ?? {};
+  }
+  chatBusy(id: string, threadKey: string) {
+    return this.chatRequests.has(`${id}:${threadKey}`);
+  }
+  caseChatBusy(id: string) {
+    return [...this.chatRequests.keys()].some((key) =>
+      key.startsWith(`${id}:`),
+    );
+  }
+  async ask(
+    id: string,
+    threadKey: string,
+    snapshot: Snapshot,
+    question?: string,
+  ) {
+    const record = this.get(id),
+      key = `${id}:${threadKey}`;
+    if (!record || this.chatRequests.has(key)) return;
+    const text = question?.trim();
+    const previous = record.chatThreads?.[threadKey] ?? { messages: [] };
+    if (
+      (question !== undefined && !text) ||
+      (question === undefined &&
+        previous.messages[previous.messages.length - 1]?.role !== "user")
+    )
+      return;
+    const context = createCaseChatContext(snapshot);
+    const messages = structuredClone(previous.messages);
+    if (text)
+      messages.push({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: text,
+        time: new Date().toISOString(),
+        context,
+      });
+    else
+      messages[messages.length - 1] = {
+        ...messages[messages.length - 1],
+        context,
+      };
+    const job = {
+      token: crypto.randomUUID(),
+      controller: new AbortController(),
+      started: performance.now(),
+    };
+    this.chatRequests.set(key, job);
+    this.mutate(
+      id,
+      (r) => ({
+        ...r,
+        chatThreads: {
+          ...r.chatThreads,
+          [threadKey]: { messages, error: undefined },
+        },
+      }),
+      false,
+    );
+    try {
+      const answer = await this.chatAnswer(
+        context,
+        messages,
+        job.controller.signal,
+      );
+      if (this.chatRequests.get(key) !== job || !this.get(id)) return;
+      this.mutate(
+        id,
+        (r) => ({
+          ...r,
+          chatThreads: {
+            ...r.chatThreads,
+            [threadKey]: {
+              messages: [
+                ...(r.chatThreads?.[threadKey]?.messages ?? messages),
+                {
+                  id: crypto.randomUUID(),
+                  role: "assistant",
+                  content: answer,
+                  time: new Date().toISOString(),
+                  context,
+                },
+              ],
+              error: undefined,
+            },
+          },
+        }),
+        false,
+      );
+    } catch (e) {
+      if (
+        this.chatRequests.get(key) === job &&
+        this.get(id) &&
+        !job.controller.signal.aborted
+      )
+        this.mutate(
+          id,
+          (r) => ({
+            ...r,
+            chatThreads: {
+              ...r.chatThreads,
+              [threadKey]: {
+                messages: r.chatThreads?.[threadKey]?.messages ?? messages,
+                error: (e as Error).message || "回复暂未完成，请重试",
+              },
+            },
+          }),
+          false,
+        );
+    } finally {
+      if (this.chatRequests.get(key) === job) {
+        this.chatRequests.delete(key);
+        this.emit();
+      }
+    }
   }
   private state(id: string) {
     if (!this.activities.has(id)) this.activities.set(id, {});
@@ -479,6 +597,11 @@ export class CaseWorkspace {
   }
   async remove(id: string) {
     this.cancel(id);
+    for (const [key, job] of this.chatRequests)
+      if (key.startsWith(`${id}:`)) {
+        job.controller.abort();
+        this.chatRequests.delete(key);
+      }
     await this.repo.remove(id);
     this.records.delete(id);
     this.activities.delete(id);

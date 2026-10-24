@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useId } from "react";
 import {
   FIELD_LABELS,
   CATEGORIES,
@@ -43,6 +43,17 @@ export default function OrderPanel({
   const [image, setImage] = useState(""),
     [imageError, setImageError] = useState("");
   const dialog = useRef<HTMLDialogElement>(null);
+  const corrections = useRef<HTMLDetailsElement>(null);
+  const actualPaymentInput = useRef<HTMLInputElement>(null);
+  const panelId = useId();
+  const showActualPayment = () => {
+    if (corrections.current) corrections.current.open = true;
+    actualPaymentInput.current?.focus({ preventScroll: true });
+    actualPaymentInput.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  };
   useEffect(() => {
     let live = true;
     setImage("");
@@ -92,6 +103,20 @@ export default function OrderPanel({
       : settlement
         ? String(settlement.subsidy / 1000)
         : (order.overrides.subsidyAmount ?? "");
+  const observedSubsidy = (() => {
+    try {
+      return (
+        (order.recognition?.discounts ?? []).some(
+          (row) =>
+            governmentLine(row.name, row.category) && money(row.amount) > 0,
+        ) ||
+        (order.recognition?.fields.subsidyAmount?.presence === "visible" &&
+          money(order.recognition.fields.subsidyAmount.amount ?? "0") > 0)
+      );
+    } catch {
+      return settlement?.subsidyObserved ?? false;
+    }
+  })();
   const spendingFields = (
     [
       "ecard",
@@ -172,6 +197,9 @@ export default function OrderPanel({
           ? "政府补贴金额"
           : FIELD_LABELS[k]}
         <input
+          id={`${panelId}-${k}`}
+          data-order-field={k}
+          ref={k === "actualPayment" ? actualPaymentInput : undefined}
           inputMode="decimal"
           value={shown}
           placeholder="未显示"
@@ -442,39 +470,85 @@ export default function OrderPanel({
           </div>
         )}
         {platform === "jd" && (
-          <div className="subsidy-strip">
-            <span>政府补贴金额</span>
-            <label>
-              <span>¥</span>
-              <input
-                className="subsidy-amount-input"
-                aria-label={`${title}政府补贴金额`}
-                inputMode="decimal"
-                value={subsidyText}
-                onChange={(e) =>
-                  change(setSubsidyAmount(order, e.target.value))
-                }
-              />
-            </label>
-            <span>政府补贴比例</span>
-            <label>
-              <input
-                aria-label={`${title}政府补贴比例`}
-                inputMode="decimal"
-                value={rateText}
-                disabled={rateLocked}
-                onChange={(e) => change(setSubsidyRate(order, e.target.value))}
-              />
-              <span>%</span>
-            </label>
-            <small>
+          <div
+            className={`subsidy-strip ${observedSubsidy ? "subsidy-observed" : "subsidy-default"}`}
+          >
+            <div className="subsidy-card-heading">
+              <strong>政府补贴</strong>
+              <span className="subsidy-state">
+                {observedSubsidy
+                  ? "已识别，以截图为准"
+                  : "默认比例 · 待人工确认"}
+              </span>
+            </div>
+            <div className="subsidy-controls">
+              <label className="subsidy-control">
+                <span className="subsidy-control-caption">补贴金额</span>
+                <span className="subsidy-input-unit">
+                  <span>¥</span>
+                  <input
+                    className="subsidy-amount-input"
+                    aria-label={`${title}政府补贴金额`}
+                    inputMode="decimal"
+                    value={subsidyText}
+                    onChange={(e) =>
+                      change(setSubsidyAmount(order, e.target.value))
+                    }
+                  />
+                </span>
+              </label>
+              <label className="subsidy-control">
+                <span className="subsidy-control-caption">补贴比例</span>
+                <span className="subsidy-input-unit">
+                  <input
+                    aria-label={`${title}政府补贴比例`}
+                    inputMode="decimal"
+                    value={rateText}
+                    disabled={rateLocked}
+                    onChange={(e) =>
+                      change(setSubsidyRate(order, e.target.value))
+                    }
+                  />
+                  <span>%</span>
+                </span>
+              </label>
+              <div
+                className="subsidy-payment-preview"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <span>补贴后客户实付</span>
+                <strong>
+                  {settlement
+                    ? `¥${settlement.payment / 1000}`
+                    : "待金额完整后计算"}
+                </strong>
+              </div>
+            </div>
+            <small className="subsidy-lock-note">
               {rateLocked
                 ? "已按识别金额锁定；修改补贴金额可解锁"
                 : "修改比例将同步计算补贴与客户实付"}
             </small>
+            <div className="subsidy-guidance">
+              <p>
+                {observedSubsidy
+                  ? "已采用截图中的政府补贴金额，客户实付随金额调整联动更新。"
+                  : "修改政府补贴比例会重新计算客户实付；请展开金额字段明细，确保客户实付与用户手机显示金额一致。"}
+              </p>
+              <button
+                type="button"
+                onClick={showActualPayment}
+                aria-controls={`${panelId}-corrections`}
+              >
+                查看客户实付
+              </button>
+            </div>
           </div>
         )}
         <details
+          ref={corrections}
+          id={`${panelId}-corrections`}
           className="corrections"
           open={
             reviewWarnings.some((w) => w.field !== undefined) ? true : undefined

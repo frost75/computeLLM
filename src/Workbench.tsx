@@ -1,12 +1,8 @@
 import { useState, useEffect, useMemo } from "react";
-import {
-  newCase,
-  newOrder,
-  type CaseFile,
-  type Snapshot,
-} from "./domain/contracts";
+import { newCase, type CaseFile, type Snapshot } from "./domain/contracts";
 import { evaluate } from "./domain/rules";
 import OrderPanel from "./components/OrderPanel";
+import CaseChatPanel from "./components/CaseChatPanel";
 import { yuan } from "./domain/money";
 import { recognize } from "./services/recognition";
 import { repository } from "./services/cases";
@@ -18,7 +14,8 @@ export default function Workbench() {
     [tick, setTick] = useState(0),
     [search, setSearch] = useState(""),
     [error, setError] = useState(""),
-    [historyId, setHistoryId] = useState<string | null>(null);
+    [historyId, setHistoryId] = useState<string | null>(null),
+    [chatOpen, setChatOpen] = useState<Record<string, boolean>>({});
   useEffect(() => workspace.subscribe(() => setTick((v) => v + 1)), []);
   useEffect(
     () =>
@@ -39,7 +36,9 @@ export default function Workbench() {
       .then((list) => {
         if (!live) return;
         workspace.seed(list);
-        const first = workspace.list()[0] ?? workspace.add(newCase());
+        const first =
+          workspace.list().find((c) => c.draft.platform === "jd") ??
+          workspace.add(newCase());
         setActiveId(first.id);
       })
       .catch((e) => setError(String(e)));
@@ -49,24 +48,16 @@ export default function Workbench() {
   }, []);
   void tick;
   const record = workspace.get(activeId),
-    cases = workspace.list();
+    cases = workspace.list().filter((c) => c.draft.platform === "jd");
   const activity = workspace.activity(activeId),
     busy = { original: !!activity.original, current: !!activity.current };
   const historical =
-    record?.revisions.find((r) => r.id === historyId)?.snapshot ?? null;
+    record?.revisions.find(
+      (r) => r.id === historyId && r.snapshot.platform === "jd",
+    )?.snapshot ?? null;
   const snapshot = historical ?? record?.draft;
   const saveState = record ? repository.status(record.id) : "";
   const review = snapshot?.aiReview;
-  const aiResponseText = useMemo(() => {
-    try {
-      return review?.responseText
-        ? JSON.stringify(JSON.parse(review.responseText), null, 2)
-        : "";
-    } catch {
-      return review?.responseText ?? "";
-    }
-  }, [review?.responseText]);
-  const reviewing = !historical && !!activity.review;
   const reviewWarnings =
     review?.status === "stale" ? [] : (review?.warnings ?? []).slice(0, 3);
   const evaluation = useMemo(
@@ -116,6 +107,8 @@ export default function Workbench() {
   if (!record || !snapshot)
     return <main>{error || "正在打开本机案例库…"}</main>;
   const result = historical?.result ?? evaluation.result;
+  const threadKey = historyId ?? "draft";
+  const chatKey = `${record.id}:${threadKey}`;
   return (
     <div className="workbench">
       <aside>
@@ -138,14 +131,14 @@ export default function Workbench() {
               <small>
                 {c.revisions.length} 个修订 ·{" "}
                 {workspace.activity(c.id).review
-                  ? "AI复核中"
+                  ? "处理中"
                   : workspace.activity(c.id).original ||
                       workspace.activity(c.id).current
                     ? "识别中"
                     : c.draft.aiReview?.status === "done"
                       ? "已完成"
                       : c.draft.aiReview?.status === "failed"
-                        ? "⚠️复核失败"
+                        ? ""
                         : ""}
               </small>
             </button>
@@ -154,7 +147,7 @@ export default function Workbench() {
       <main>
         <header>
           <div>
-            <h1>{snapshot.platform === "jd" ? "京东" : "天猫"}退差计算器</h1>
+            <h1>京东退差计算器</h1>
             <span className="hint">{saveState}</span>
             {saveState.includes("待同步") && (
               <button
@@ -175,7 +168,9 @@ export default function Workbench() {
               if (window.confirm("删除本案例及全部修订？")) {
                 try {
                   await workspace.remove(record.id);
-                  const next = workspace.list()[0] ?? workspace.add(newCase());
+                  const next =
+                    workspace.list().find((c) => c.draft.platform === "jd") ??
+                    workspace.add(newCase());
                   setActiveId(next.id);
                   setHistorical(null);
                 } catch (e) {
@@ -200,25 +195,7 @@ export default function Workbench() {
           }
         />
         <nav>
-          <label>
-            入口
-            <select
-              disabled={!!historical || Object.values(busy).some(Boolean)}
-              value={snapshot.platform}
-              onChange={(e) => {
-                if (window.confirm("切换入口将清空当前草稿，历史修订保留。"))
-                  update({
-                    platform: e.target.value as Snapshot["platform"],
-                    original: newOrder(),
-                    current: newOrder(),
-                    comparisonConfirmed: false,
-                  });
-              }}
-            >
-              <option value="jd">京东自营 / POP</option>
-              <option value="tmall">天猫</option>
-            </select>
-          </label>
+          <span className="entry-badge">京东自营 / POP</span>
           <label>
             岗位
             <select
@@ -249,11 +226,13 @@ export default function Workbench() {
               }
             >
               <option value="draft">当前草稿</option>
-              {record.revisions.map((v, i) => (
-                <option key={v.id} value={v.id}>
-                  修订{i + 1} · {new Date(v.time).toLocaleString()}
-                </option>
-              ))}
+              {record.revisions
+                .filter((v) => v.snapshot.platform === "jd")
+                .map((v, i) => (
+                  <option key={v.id} value={v.id}>
+                    修订{i + 1} · {new Date(v.time).toLocaleString()}
+                  </option>
+                ))}
             </select>
           </label>
           {historical && (
@@ -306,23 +285,7 @@ export default function Workbench() {
           </div>
         </div>
         {!historical && (
-          <div className="ai-toolbar">
-            <button
-              disabled={
-                Object.values(busy).some(Boolean) ||
-                reviewing ||
-                !snapshot.original.imageId ||
-                !snapshot.current.imageId
-              }
-              onClick={() => void workspace.review(record.id, true)}
-            >
-              {reviewing ? "AI复核中…" : "AI复核"}
-            </button>
-            <span>
-              {review?.status === "stale"
-                ? "已按当前字段重新计算；上次AI复核仅针对修改前的快照。"
-                : (review?.summary ?? "两张截图识别后自动统一复核。")}
-            </span>
+          <div className="recognition-retry">
             {(["original", "current"] as const).map(
               (side) =>
                 snapshot[side].recognitionError &&
@@ -407,41 +370,51 @@ export default function Workbench() {
               <div className="customer">
                 <strong>可发送给用户</strong>
                 <p>{result.customerText}</p>
-                <button
-                  onClick={() =>
-                    navigator.clipboard
-                      .writeText(result.customerText)
-                      .catch(() => setError("复制失败，请手动选取话术复制"))
-                  }
-                >
-                  复制用户话术
-                </button>
-              </div>
-              <details>
-                <summary>
-                  {snapshot.platform === "jd"
-                    ? "客服处理建议"
-                    : "客服处理建议与关怀方案"}
-                </summary>
-                {result.internal.map((v, i) => (
-                  <p key={i}>{v}</p>
-                ))}
-                {result.careText && (
-                  <>
-                    <p>确认采用关怀方案后可发送：</p>
-                    <blockquote>{result.careText}</blockquote>
-                    <button
-                      onClick={() =>
-                        navigator.clipboard
-                          .writeText(result.careText!)
-                          .catch(() => setError("复制失败，请手动复制"))
-                      }
-                    >
-                      复制关怀话术
-                    </button>
-                  </>
+                <div className="customer-actions">
+                  <button
+                    onClick={() =>
+                      navigator.clipboard
+                        .writeText(result.customerText)
+                        .catch(() => setError("复制失败，请手动选取话术复制"))
+                    }
+                  >
+                    复制用户话术
+                  </button>
+                  <button
+                    className="ask-ai"
+                    aria-expanded={!!chatOpen[chatKey]}
+                    onClick={() =>
+                      setChatOpen((previous) => ({
+                        ...previous,
+                        [chatKey]: !previous[chatKey],
+                      }))
+                    }
+                  >
+                    有疑问？问AI
+                  </button>
+                </div>
+                {chatOpen[chatKey] && (
+                  <CaseChatPanel
+                    key={chatKey}
+                    thread={record.chatThreads?.[threadKey]}
+                    busy={workspace.chatBusy(record.id, threadKey)}
+                    onSend={(question) =>
+                      void workspace.ask(
+                        record.id,
+                        threadKey,
+                        { ...snapshot, result },
+                        question,
+                      )
+                    }
+                    onRetry={() =>
+                      void workspace.ask(record.id, threadKey, {
+                        ...snapshot,
+                        result,
+                      })
+                    }
+                  />
                 )}
-              </details>
+              </div>
               <details>
                 <summary>金额说明</summary>
 
@@ -457,51 +430,6 @@ export default function Workbench() {
               </details>
             </>
           )}
-        </section>
-        <section className="ai-report">
-          <h2>AI复核记录</h2>
-          <p>
-            {review?.summary ??
-              "尚未复核。两张截图识别结束后自动执行，也可点击AI复核。"}
-          </p>
-          {review?.changes.length ? (
-            <ul>
-              {review.changes.map((change, i) => (
-                <li key={i}>{change}</li>
-              ))}
-            </ul>
-          ) : null}
-          {review?.actions?.length ? (
-            <ul>
-              {review.actions.map((action, i) => (
-                <li key={i}>{action}</li>
-              ))}
-            </ul>
-          ) : null}
-          <p className="hint">
-            识别耗时：原订单{" "}
-            {activity.recognitionMs?.original === undefined
-              ? "—"
-              : (activity.recognitionMs.original / 1000).toFixed(1) + "秒"}
-            ；现订单{" "}
-            {activity.recognitionMs?.current === undefined
-              ? "—"
-              : (activity.recognitionMs.current / 1000).toFixed(1) + "秒"}
-            ；AI复核{" "}
-            {review?.elapsedMs === undefined
-              ? "—"
-              : (review.elapsedMs / 1000).toFixed(1) + "秒"}
-            。切换案例后任务继续。
-          </p>
-          <label>
-            LLM返回信息（检查结论、修改及判断依据）
-            <textarea
-              aria-label="LLM返回信息"
-              readOnly
-              rows={12}
-              value={aiResponseText}
-            />
-          </label>
         </section>
       </main>
     </div>

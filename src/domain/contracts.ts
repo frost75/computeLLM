@@ -160,6 +160,18 @@ export interface CaseFile {
   draft: Snapshot;
   revisions: Revision[];
   baseRevision: string | null;
+  chatThreads?: Record<string, CaseChatThread>;
+}
+export interface CaseChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  time: string;
+  context?: Snapshot;
+}
+export interface CaseChatThread {
+  messages: CaseChatMessage[];
+  error?: string;
 }
 export const newOrder = (): OrderInput => ({
   overrides: {},
