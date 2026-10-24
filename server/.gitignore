@@ -1,0 +1,29 @@
+# Dependency directories
+# IMPORTANT: bare pattern (no trailing slash) so it also matches the
+# fast-init `node_modules` symlink that points to /opt/aiapp/server_scaffold/server/node_modules.
+# A pattern like `node_modules/` would only match real directories, letting the
+# symlink slip into commits and breaking remote FC builds with ENOTDIR.
+node_modules
+
+# Build output
+dist
+build
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Lock files (npm install gets re-run in image)
+yarn.lock
+pnpm-lock.yaml
+package-lock.json
+
+# Local env / editor
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.swp
