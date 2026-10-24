@@ -46,7 +46,7 @@ export const CATEGORIES = {
 export type Category = keyof typeof CATEGORIES;
 export interface Discount {
   sourceRegion?: "receivable" | "payment" | "other";
-  payerSource?: "evidence" | "inferred" | "manual";
+  payerSource?: "evidence" | "inferred" | "manual" | "review";
   payerReason?: string;
   name: string;
   amount: string;
@@ -84,6 +84,16 @@ export interface Recognition {
   };
 }
 export interface OrderInput {
+  subsidyControl?: { mode: "amount" | "rate"; amount?: string; rate?: string };
+  calculated?: {
+    actualPayment: string;
+    subsidyAmount: string;
+    rate: number;
+    rateLocked: boolean;
+    subsidyObserved: boolean;
+    base: number;
+    source: string;
+  };
   automatic?: boolean;
   recognitionError?: string;
   imageId?: string;
@@ -120,6 +130,21 @@ export interface Snapshot {
   current: OrderInput;
   result: Result | null;
   comparisonConfirmed?: boolean;
+  aiReview?: {
+    status: "running" | "done" | "failed" | "stale";
+    summary: string;
+    responseText: string;
+    changes: string[];
+    actions?: string[];
+    warnings: {
+      side?: "original" | "current";
+      field?: Field;
+      index?: number;
+      message: string;
+    }[];
+    elapsedMs?: number;
+    time: string;
+  };
 }
 export interface Revision {
   id: string;

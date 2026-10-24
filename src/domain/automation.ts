@@ -26,17 +26,47 @@ export const refundLabel = (label: string) =>
   /价保|保价|费用项[加价][宝宝保]|已退差|退差退款/.test(label);
 // 支出项目的身份由业务口径决定，不能随模型建议的承担方变化。
 export const spendingField = (name: string): Field | null =>
-  /E\s*卡|e\s*卡/.test(name) ? "ecard" :
-  /礼品卡/.test(name) ? "giftCard" :
-  /支付有礼/.test(name) ? "paymentGift" :
-  /旧机抵扣/.test(name) ? "tradeInOldMachine" :
-  /以旧换新.*补贴/.test(name) ? "tradeInSubsidy" : null;
+  /E\s*卡|e\s*卡/.test(name)
+    ? "ecard"
+    : /礼品卡/.test(name)
+      ? "giftCard"
+      : /支付有礼/.test(name)
+        ? "paymentGift"
+        : /旧机抵扣/.test(name)
+          ? "tradeInOldMachine"
+          : /以旧换新.*补贴/.test(name)
+            ? "tradeInSubsidy"
+            : null;
 export function normalizeDiscount(line: Discount, platform: string): Discount {
   const category = classify(line.name, line.category, platform);
-  if (platform === "jd" && category === "jointCoupon" && line.payerSource !== "manual") {
+  if (
+    platform === "jd" &&
+    ["governmentSubsidy", "nationalSubsidy"].includes(category) &&
+    !["manual", "review"].includes(line.payerSource ?? "")
+  )
+    return {
+      ...line,
+      category,
+      payer: "store",
+      payerSource: "evidence",
+      confidence: 1,
+      payerReason: "业务默认政府/国家补贴按商家承担参与退差，可手动切换",
+    };
+  if (
+    platform === "jd" &&
+    category === "jointCoupon" &&
+    !["manual", "review"].includes(line.payerSource ?? "")
+  ) {
     const merchant = [10000, 12000].includes(money(line.amount));
-    return { ...line, category, payer: merchant ? "store" : "platform", payerSource: "evidence", confidence: 1,
-      payerReason: "按业务规则：联合优惠券10元或12元为商家承担，其他金额为平台承担" };
+    return {
+      ...line,
+      category,
+      payer: merchant ? "store" : "platform",
+      payerSource: "evidence",
+      confidence: 1,
+      payerReason:
+        "按业务规则：联合优惠券10元或12元为商家承担，其他金额为平台承担",
+    };
   }
   return { ...line, category };
 }
@@ -55,7 +85,29 @@ export const couponLine = (line: Discount) =>
   line.category === "normalCoupon" ||
   /平台券|京东券/.test(line.name);
 export const comparisonExceptions = (exceptions: string[], side: string) =>
-  exceptions.filter(reason => !(["current", "现订单"].includes(side) && /取消/.test(reason) && !/退款|退货|多商品|多数量/.test(reason)));
+  exceptions.filter(
+    (reason) =>
+      !(
+        ["current", "现订单"].includes(side) &&
+        /取消/.test(reason) &&
+        !/退款|退货|多商品|多数量/.test(reason)
+      ),
+  );
+// 兼容旧档：旧归一曾删除现单取消线索，原始识别回执仍保留完整证据。
+export function observedExceptions(recognition?: Recognition): string[] {
+  const raw = recognition?.raw;
+  const original =
+    raw &&
+    typeof raw === "object" &&
+    !Array.isArray(raw) &&
+    "exceptions" in raw &&
+    Array.isArray(raw.exceptions)
+      ? raw.exceptions.filter(
+          (reason): reason is string => typeof reason === "string",
+        )
+      : [];
+  return [...new Set([...(recognition?.exceptions ?? []), ...original])];
+}
 export function automaticOrder(
   recognition: Recognition,
   imageId: string | undefined,
@@ -70,7 +122,8 @@ export function automaticOrder(
         ? 0
         : null;
   };
-  const lines = recognition.discounts.filter(line => !spendingField(line.name))
+  const lines = recognition.discounts
+    .filter((line) => !spendingField(line.name))
     .map((line) => normalizeDiscount(line, platform));
   const status =
     recognition.paymentStatus === "unknown"
@@ -88,11 +141,27 @@ export function automaticOrder(
   const spendingRows = [...(recognition.spendingRows ?? [])];
   for (const row of recognition.discounts) {
     const field = spendingField(row.name);
-    if (field && !spendingRows.some(r => r.field === field && r.name === row.name && r.amount === row.amount))
-      spendingRows.push({ name: row.name, amount: row.amount, field, evidence: row.evidence });
+    if (
+      field &&
+      !spendingRows.some(
+        (r) =>
+          r.field === field && r.name === row.name && r.amount === row.amount,
+      )
+    )
+      spendingRows.push({
+        name: row.name,
+        amount: row.amount,
+        field,
+        evidence: row.evidence,
+      });
   }
-  const normalized: Recognition = { ...recognition, spendingRows, discounts: lines, notices,
-    exceptions: platform === "jd" ? comparisonExceptions(recognition.exceptions, side) : recognition.exceptions };
+  const normalized: Recognition = {
+    ...recognition,
+    spendingRows,
+    discounts: lines,
+    notices,
+    exceptions: observedExceptions(recognition),
+  };
   // 完整区域未发现的可选支出项目按零；必要实付/应付与总额仍保留缺失状态。
   const optional: Field[] = [
     "refundAmount",
@@ -131,7 +200,11 @@ export function automaticOrder(
     ),
     discountsConfirmed: recognition.discountsComplete,
     spendingConfirmed: recognition.spendingComplete,
-    scopeConfirmed: !normalized.exceptions.length,
+    scopeConfirmed: !(
+      platform === "jd"
+        ? comparisonExceptions(normalized.exceptions, side)
+        : normalized.exceptions
+    ).length,
     subsidyRate: "10",
   };
 }

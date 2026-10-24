@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   newCase,
   newOrder,
@@ -7,55 +7,28 @@ import {
 } from "./domain/contracts";
 import { evaluate } from "./domain/rules";
 import OrderPanel from "./components/OrderPanel";
-import { automaticOrder } from "./domain/automation";
 import { yuan } from "./domain/money";
 import { recognize } from "./services/recognition";
 import { repository } from "./services/cases";
 import { cloudLoginUrl } from "./services/cloud";
-
+import { CaseWorkspace } from "./services/caseWorkspace";
+const workspace = new CaseWorkspace(repository, recognize);
 export default function Workbench() {
-  const [record, setRecord] = useState<CaseFile | null>(null),
-    [cases, setCases] = useState<CaseFile[]>([]),
+  const [activeId, setActiveId] = useState(""),
+    [tick, setTick] = useState(0),
     [search, setSearch] = useState(""),
     [error, setError] = useState(""),
-    [busy, setBusy] = useState<Record<string, boolean>>({}),
-    [historical, setHistorical] = useState<Snapshot | null>(null),
-    [saveState, setSaveState] = useState("");
-  const active = useRef(record);
-  active.current = record;
-  const requests = useRef<Record<string, AbortController>>({}),
-    serial = useRef<Record<string, string>>({});
-  function finalized(r: CaseFile): CaseFile {
-    const evaluated = evaluate(r.draft);
-    if (!evaluated.result) return r;
-    const snap = { ...r.draft, result: evaluated.result };
-    const previous = r.revisions.find((v) => v.id === r.baseRevision);
-    if (previous && JSON.stringify(previous.snapshot) === JSON.stringify(snap))
-      return r;
-    const rev = {
-      id: crypto.randomUUID(),
-      parentId: r.baseRevision,
-      time: new Date().toISOString(),
-      snapshot: structuredClone(snap),
-    };
-    return {
-      ...r,
-      draft: snap,
-      baseRevision: rev.id,
-      revisions: [...r.revisions, rev],
-    };
-  }
-  const refresh = async () =>
-    setCases(
-      (await repository.list()).sort((a, b) =>
-        b.updatedAt.localeCompare(a.updatedAt),
-      ),
-    );
+    [historyId, setHistoryId] = useState<string | null>(null);
+  useEffect(() => workspace.subscribe(() => setTick((v) => v + 1)), []);
   useEffect(
     () =>
-      repository.subscribe((id, message) => {
-        if (id === "__refresh__") void refresh();
-        else if (active.current?.id === id) setSaveState(message);
+      repository.subscribe((id) => {
+        setTick((v) => v + 1);
+        if (id === "__refresh__")
+          void repository
+            .list()
+            .then((list) => workspace.seed(list))
+            .catch((e) => setError(String(e)));
       }),
     [],
   );
@@ -63,22 +36,39 @@ export default function Workbench() {
     let live = true;
     repository
       .list()
-      .then(async (list) => {
+      .then((list) => {
         if (!live) return;
-        const first =
-          list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ??
-          newCase();
-        if (!list.length) await repository.save(first);
-        setCases(list.length ? list : [first]);
-        setRecord(first);
+        workspace.seed(list);
+        const first = workspace.list()[0] ?? workspace.add(newCase());
+        setActiveId(first.id);
       })
       .catch((e) => setError(String(e)));
     return () => {
       live = false;
-      Object.values(requests.current).forEach((r) => r.abort());
     };
   }, []);
+  void tick;
+  const record = workspace.get(activeId),
+    cases = workspace.list();
+  const activity = workspace.activity(activeId),
+    busy = { original: !!activity.original, current: !!activity.current };
+  const historical =
+    record?.revisions.find((r) => r.id === historyId)?.snapshot ?? null;
   const snapshot = historical ?? record?.draft;
+  const saveState = record ? repository.status(record.id) : "";
+  const review = snapshot?.aiReview;
+  const aiResponseText = useMemo(() => {
+    try {
+      return review?.responseText
+        ? JSON.stringify(JSON.parse(review.responseText), null, 2)
+        : "";
+    } catch {
+      return review?.responseText ?? "";
+    }
+  }, [review?.responseText]);
+  const reviewing = !historical && !!activity.review;
+  const reviewWarnings =
+    review?.status === "stale" ? [] : (review?.warnings ?? []).slice(0, 3);
   const evaluation = useMemo(
     () =>
       snapshot
@@ -95,204 +85,33 @@ export default function Workbench() {
         : { result: null, issues: [] },
     [snapshot],
   );
-  useEffect(() => {
-    if (!record) return;
-    setSaveState("保存中…");
-    const t = setTimeout(() => {
-      repository
-        .save(record)
-        .then(() => {
-          setSaveState(repository.status(record.id));
-          return refresh();
-        })
-        .catch((e) => {
-          setSaveState("保存失败");
-          setError(String(e));
-        });
-    }, 250);
-    return () => clearTimeout(t);
-  }, [record]);
-  useEffect(() => {
-    if (
-      !record ||
-      historical ||
-      !evaluation.result ||
-      Object.values(busy).some(Boolean)
-    )
-      return;
-    const t = setTimeout(
-      () =>
-        setRecord((prev) => {
-          if (!prev || prev.id !== record.id) return prev;
-          const snap = { ...prev.draft, result: evaluation.result };
-          const last = prev.revisions.find((r) => r.id === prev.baseRevision);
-          if (last && JSON.stringify(last.snapshot) === JSON.stringify(snap))
-            return prev;
-          const revision = {
-            id: crypto.randomUUID(),
-            parentId: prev.baseRevision,
-            time: new Date().toISOString(),
-            snapshot: structuredClone(snap),
-          };
-          return {
-            ...prev,
-            draft: snap,
-            revisions: [...prev.revisions, revision],
-            baseRevision: revision.id,
-            updatedAt: new Date().toISOString(),
-          };
-        }),
-      900,
+  function setHistorical(value: Snapshot | null) {
+    setHistoryId(
+      value
+        ? (record?.revisions.find((r) => r.snapshot === value)?.id ?? null)
+        : null,
     );
-    return () => clearTimeout(t);
-  }, [record, evaluation.result, busy, historical]);
+  }
   function update(patch: Partial<Snapshot>) {
-    setRecord((prev) =>
-      prev
-        ? {
-            ...prev,
-            updatedAt: new Date().toISOString(),
-            draft: { ...prev.draft, ...patch, result: null },
-          }
-        : prev,
-    );
+    if (record) workspace.change(record.id, patch);
   }
   function cancelRecognition(side?: "original" | "current") {
-    const sides = side ? [side] : ["original", "current"];
-    for (const key of sides) {
-      // Invalidate first: an aborted request can still finish file IO or hit cache.
-      delete serial.current[key];
-      requests.current[key]?.abort();
-      delete requests.current[key];
-    }
-    setBusy((v) => side ? { ...v, [side]: false } : {});
+    if (record) workspace.cancel(record.id, side);
   }
   function swapOrders() {
-    if (historical) return;
-    cancelRecognition();
-    setError("");
-    setRecord((prev) => {
-      if (!prev) return prev;
-      // Preserve even an incomplete draft, so the exchange is always reversible.
-      const before = {
-        id: crypto.randomUUID(),
-        parentId: prev.baseRevision,
-        time: new Date().toISOString(),
-        snapshot: structuredClone(prev.draft),
-      };
-      const swapped: Snapshot = {
-        ...prev.draft,
-        original: structuredClone(prev.draft.current),
-        current: structuredClone(prev.draft.original),
-        comparisonConfirmed: false,
-        result: null,
-      };
-      swapped.result = evaluate(swapped).result;
-      const after = {
-        id: crypto.randomUUID(),
-        parentId: before.id,
-        time: new Date().toISOString(),
-        snapshot: structuredClone(swapped),
-      };
-      return {
-        ...prev,
-        draft: swapped,
-        updatedAt: after.time,
-        baseRevision: after.id,
-        revisions: [...prev.revisions, before, after],
-      };
-    });
+    if (record && !historical) {
+      setError("");
+      workspace.swap(record.id);
+    }
   }
   async function navigate(next: CaseFile) {
-    if (next.id === active.current?.id) {
-      setHistorical(null);
-      return;
-    }
-    Object.values(requests.current).forEach((r) => r.abort());
-    serial.current = {};
-    setBusy({});
-    if (active.current) await repository.save(finalized(active.current));
-    setHistorical(null);
-    setRecord(next);
+    if (!workspace.get(next.id)) workspace.add(next);
+    setActiveId(next.id);
+    setHistoryId(null);
     setError("");
   }
   async function upload(side: "original" | "current", file: File) {
-    if (!record) return;
-    const id = record.id,
-      platform = record.draft.platform,
-      token = crypto.randomUUID();
-    serial.current[side] = token;
-    requests.current[side]?.abort();
-    const controller = new AbortController();
-    requests.current[side] = controller;
-    setBusy((v) => ({ ...v, [side]: true }));
-    setError("");
-    try {
-      if (
-        !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(
-          file.type,
-        ) ||
-        file.size > 10 * 1024 * 1024
-      )
-        throw new Error("请选择10MB以内的图片");
-      const data = await new Promise<string>((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(String(r.result));
-        r.onerror = () => reject(new Error("图片读取失败"));
-        r.readAsDataURL(file);
-      });
-      const imageId = crypto.randomUUID();
-      await repository.putImage(imageId, data);
-      if (active.current?.id !== id || serial.current[side] !== token) return;
-      const fresh = { ...newOrder(), imageId };
-      setRecord((p) =>
-        p && p.id === id && serial.current[side] === token
-          ? { ...p, draft: { ...p.draft, [side]: fresh, result: null } }
-          : p,
-      );
-      const recognition = await recognize(
-        data,
-        platform,
-        side,
-        controller.signal,
-      );
-      if (active.current?.id !== id || serial.current[side] !== token) return;
-      setRecord((p) =>
-        p && p.id === id && serial.current[side] === token
-          ? {
-              ...p,
-              draft: {
-                ...p.draft,
-                [side]: automaticOrder(recognition, imageId, side, platform),
-                result: null,
-              },
-            }
-          : p,
-      );
-    } catch (e) {
-      if (active.current?.id === id && serial.current[side] === token) {
-        setError(
-          `${side === "original" ? "原订单" : "现订单"}：${(e as Error).message}。可重新上传该图重试或手动填写。`,
-        );
-        setRecord((p) =>
-          p && p.id === id && serial.current[side] === token
-            ? {
-                ...p,
-                draft: {
-                  ...p.draft,
-                  [side]: {
-                    ...p.draft[side],
-                    recognitionError: (e as Error).message,
-                  },
-                },
-              }
-            : p,
-        );
-      }
-    } finally {
-      if (serial.current[side] === token)
-        setBusy((v) => ({ ...v, [side]: false }));
-    }
+    if (record) await workspace.upload(record.id, side, file);
   }
   if (!record || !snapshot)
     return <main>{error || "正在打开本机案例库…"}</main>;
@@ -316,7 +135,19 @@ export default function Workbench() {
               onClick={() => navigate(c)}
             >
               {c.title}
-              <small>{c.revisions.length} 个修订</small>
+              <small>
+                {c.revisions.length} 个修订 ·{" "}
+                {workspace.activity(c.id).review
+                  ? "AI复核中"
+                  : workspace.activity(c.id).original ||
+                      workspace.activity(c.id).current
+                    ? "识别中"
+                    : c.draft.aiReview?.status === "done"
+                      ? "已完成"
+                      : c.draft.aiReview?.status === "failed"
+                        ? "⚠️复核失败"
+                        : ""}
+              </small>
             </button>
           ))}
       </aside>
@@ -342,15 +173,14 @@ export default function Workbench() {
           <button
             onClick={async () => {
               if (window.confirm("删除本案例及全部修订？")) {
-                Object.values(requests.current).forEach((r) => r.abort());
-                serial.current = {};
-                setRecord(null);
-                active.current = null;
-                await repository.remove(record.id);
-                setCases(await repository.list());
-                setRecord(newCase());
-                setHistorical(null);
-                setBusy({});
+                try {
+                  await workspace.remove(record.id);
+                  const next = workspace.list()[0] ?? workspace.add(newCase());
+                  setActiveId(next.id);
+                  setHistorical(null);
+                } catch (e) {
+                  setError(`删除失败，案例已保留：${String(e)}`);
+                }
               }
             }}
           >
@@ -362,11 +192,11 @@ export default function Workbench() {
           aria-label="案例标题"
           value={record.title}
           onChange={(e) =>
-            setRecord({
-              ...record,
-              title: e.target.value,
-              updatedAt: new Date().toISOString(),
-            })
+            workspace.mutate(
+              record.id,
+              (r) => ({ ...r, title: e.target.value }),
+              false,
+            )
           }
         />
         <nav>
@@ -433,11 +263,11 @@ export default function Workbench() {
                 const revision = record.revisions.find(
                   (r) => r.snapshot === historical,
                 );
-                setRecord({
-                  ...record,
+                workspace.mutate(record.id, (r) => ({
+                  ...r,
                   draft: { ...structuredClone(historical), result: null },
                   baseRevision: revision?.id ?? null,
-                });
+                }));
                 setHistorical(null);
               }}
             >
@@ -445,9 +275,9 @@ export default function Workbench() {
             </button>
           )}
         </nav>
-        {error && (
+        {!!(error || activity.errors?.length) && (
           <div role="alert" className="error">
-            {error}
+            {error || activity.errors?.join("；")}
           </div>
         )}
         <div>
@@ -467,12 +297,63 @@ export default function Workbench() {
                 change={(o) => update({ [side]: o })}
                 upload={(f) => upload(side, f)}
                 busy={!!busy[side]}
+                reviewWarnings={reviewWarnings.filter((w) => w.side === side)}
+                reviewed={review?.status === "done"}
                 readOnly={!!historical}
                 cancel={() => cancelRecognition(side)}
               />
             ))}
           </div>
         </div>
+        {!historical && (
+          <div className="ai-toolbar">
+            <button
+              disabled={
+                Object.values(busy).some(Boolean) ||
+                reviewing ||
+                !snapshot.original.imageId ||
+                !snapshot.current.imageId
+              }
+              onClick={() => void workspace.review(record.id, true)}
+            >
+              {reviewing ? "AI复核中…" : "AI复核"}
+            </button>
+            <span>
+              {review?.status === "stale"
+                ? "已按当前字段重新计算；上次AI复核仅针对修改前的快照。"
+                : (review?.summary ?? "两张截图识别后自动统一复核。")}
+            </span>
+            {(["original", "current"] as const).map(
+              (side) =>
+                snapshot[side].recognitionError &&
+                !busy[side] && (
+                  <button
+                    key={side}
+                    onClick={() =>
+                      void workspace.recognizeSide(record.id, side)
+                    }
+                  >
+                    重试{side === "original" ? "原订单" : "现订单"}识别
+                  </button>
+                ),
+            )}
+          </div>
+        )}
+        {reviewWarnings.length > 0 && (
+          <details className="ai-notes">
+            <summary>AI提示（{reviewWarnings.length}）</summary>
+            {reviewWarnings.map((w, i) => (
+              <p key={i}>
+                {w.side === "original"
+                  ? "原订单："
+                  : w.side === "current"
+                    ? "现订单："
+                    : ""}
+                {w.message}
+              </p>
+            ))}
+          </details>
+        )}
         <section className="result">
           <h2>{historical ? "历史结果（保留当时版本）" : "退差结果"}</h2>
           {!result ? (
@@ -488,12 +369,41 @@ export default function Workbench() {
             </div>
           ) : (
             <>
-              <div className="result-amounts">
-                <div><span>基础退差</span><strong>¥{yuan(result.base)}</strong></div>
-                <div><span>额外关怀参考</span><strong>{result.extra === null ? "待确认" : `¥${yuan(result.extra)}`}</strong></div>
-                <div><span>含关怀合计</span><strong>{result.total === null ? "待确认" : `¥${yuan(result.total)}`}</strong></div>
+              <div
+                className={`result-amounts ${snapshot.platform === "jd" ? "single" : ""}`}
+              >
+                <div>
+                  <span>
+                    {snapshot.platform === "jd" ? "可退差价" : "基础退差"}
+                  </span>
+                  <strong>¥{yuan(result.base)}</strong>
+                </div>
+                {snapshot.platform !== "jd" && (
+                  <>
+                    <div>
+                      <span>额外关怀参考</span>
+                      <strong>
+                        {result.extra === null
+                          ? "待确认"
+                          : `¥${yuan(result.extra)}`}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>含关怀合计</span>
+                      <strong>
+                        {result.total === null
+                          ? "待确认"
+                          : `¥${yuan(result.total)}`}
+                      </strong>
+                    </div>
+                  </>
+                )}
               </div>
-              <p className="hint">额外关怀及合计供客服评估方案，需确认采用后再告知用户。</p>
+              <p className="hint">
+                {snapshot.platform === "jd"
+                  ? "仅计算商家承担的优惠差额，平台承担部分不退。"
+                  : "额外关怀及合计供客服评估方案，需确认采用后再告知用户。"}
+              </p>
               <div className="customer">
                 <strong>可发送给用户</strong>
                 <p>{result.customerText}</p>
@@ -508,9 +418,13 @@ export default function Workbench() {
                 </button>
               </div>
               <details>
-                <summary>客服处理建议与关怀方案</summary>
-                {result.internal.map((v) => (
-                  <p key={v}>{v}</p>
+                <summary>
+                  {snapshot.platform === "jd"
+                    ? "客服处理建议"
+                    : "客服处理建议与关怀方案"}
+                </summary>
+                {result.internal.map((v, i) => (
+                  <p key={i}>{v}</p>
                 ))}
                 {result.careText && (
                   <>
@@ -533,12 +447,61 @@ export default function Workbench() {
 
                 {Object.entries(result.basis).map(([k, v]) => (
                   <p key={k}>
-                    {k}：{v === null ? "待确认" : `${yuan(v)}元`}
+                    {snapshot.platform === "jd" &&
+                    ["原订单优惠", "现订单优惠", "优惠差额"].includes(k)
+                      ? k.replace("优惠", "商家优惠")
+                      : k}
+                    ：{v === null ? "待确认" : `${yuan(v)}元`}
                   </p>
                 ))}
               </details>
             </>
           )}
+        </section>
+        <section className="ai-report">
+          <h2>AI复核记录</h2>
+          <p>
+            {review?.summary ??
+              "尚未复核。两张截图识别结束后自动执行，也可点击AI复核。"}
+          </p>
+          {review?.changes.length ? (
+            <ul>
+              {review.changes.map((change, i) => (
+                <li key={i}>{change}</li>
+              ))}
+            </ul>
+          ) : null}
+          {review?.actions?.length ? (
+            <ul>
+              {review.actions.map((action, i) => (
+                <li key={i}>{action}</li>
+              ))}
+            </ul>
+          ) : null}
+          <p className="hint">
+            识别耗时：原订单{" "}
+            {activity.recognitionMs?.original === undefined
+              ? "—"
+              : (activity.recognitionMs.original / 1000).toFixed(1) + "秒"}
+            ；现订单{" "}
+            {activity.recognitionMs?.current === undefined
+              ? "—"
+              : (activity.recognitionMs.current / 1000).toFixed(1) + "秒"}
+            ；AI复核{" "}
+            {review?.elapsedMs === undefined
+              ? "—"
+              : (review.elapsedMs / 1000).toFixed(1) + "秒"}
+            。切换案例后任务继续。
+          </p>
+          <label>
+            LLM返回信息（检查结论、修改及判断依据）
+            <textarea
+              aria-label="LLM返回信息"
+              readOnly
+              rows={12}
+              value={aiResponseText}
+            />
+          </label>
         </section>
       </main>
     </div>

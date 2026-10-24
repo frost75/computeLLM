@@ -208,6 +208,8 @@ export const repository = {
   retry: () => sync(),
   async remove(id: string) {
     await writes.catch(() => {});
+    const removed = await run<CaseFile | undefined>("cases", "readonly", (s) => s.get(id));
+    const candidates = new Set(removed ? imageIds(removed) : []);
     await store(null, id);
     const db = await database;
     await new Promise<void>((resolve, reject) => {
@@ -227,7 +229,7 @@ export const repository = {
         c.onsuccess = () => {
           const row = c.result;
           if (row) {
-            if (!used.has(String(row.key))) row.delete();
+            if (candidates.has(String(row.key)) && !used.has(String(row.key))) row.delete();
             row.continue();
           }
         };
