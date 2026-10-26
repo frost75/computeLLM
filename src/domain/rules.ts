@@ -155,10 +155,23 @@ export function evaluate(input: Snapshot): {
           ? a.platformCoupon - b.platformCoupon
           : null
         : residual;
-    // 京东平台优惠不退，不以平台券差额自动叠加关怀。
+    // 权限依据未补足的正支出差额；不把残差归因为某张平台券。
+    // 商家优惠为负时基础退差为零，额外补偿也不能超过正支出差额。
+    const gap = Math.max(0, p - base);
+    const permission = (cap: number) => {
+      const extra = Math.min(gap, cap);
+      return {
+        extra,
+        total: base + extra,
+        customerText:
+          extra > 0
+            ? `您好，核对两笔订单的优惠和实际支出后，本次可为您提供${yuan(extra)}元额外补偿${base > 0 ? `，加上可退差价${yuan(base)}元，合计${yuan(base + extra)}元` : ""}。`
+            : customerText,
+      };
+    };
     const extra =
       input.platform === "jd"
-        ? 0
+        ? Math.min(gap, config.caps[input.role])
         : q === null
           ? null
           : Math.min(Math.max(q, 0), config.caps[input.role]);
@@ -169,6 +182,14 @@ export function evaluate(input: Snapshot): {
         : status === "reject"
           ? "您好，核对后，现订单的商家优惠没有增加，本次不符合退差条件，暂时没有可退的差价。"
           : "您好，核对两笔订单的商家优惠和实际支出后，本次没有产生可退的差价。";
+    const permissions =
+      input.platform === "jd"
+        ? {
+            gap,
+            member: permission(JD_RULE.caps.member),
+            leader: permission(JD_RULE.caps.leader),
+          }
+        : undefined;
     return {
       issues: [],
       result: {
@@ -179,8 +200,12 @@ export function evaluate(input: Snapshot): {
         extra,
         total: extra === null ? null : base + extra,
         customerText,
-        careText:
-          extra !== null && extra > 0
+        permissions,
+        careText: permissions
+          ? extra && extra > 0
+            ? permissions[input.role].customerText
+            : null
+          : extra !== null && extra > 0
             ? `您好，本次可提供${yuan(extra)}元关怀方案${base > 0 ? `，加上退差价${yuan(base)}元，合计${yuan(base + extra)}元` : ""}。`
             : null,
         internal: [
@@ -196,7 +221,7 @@ export function evaluate(input: Snapshot): {
               ]
             : []),
           input.platform === "jd"
-            ? "平台承担的优惠不计入可退优惠，不自动叠加平台券关怀；如有其他诉求，请按实际情况另行处理。"
+            ? `平台优惠不计入规则内退差。未补足支出差额${yuan(gap)}元，额外补偿按岗位上限计算，需确认采用后使用对应话术。`
             : extra === null
               ? "平台券承担来源未确认：基础金额可核对，暂不计算额外关怀。"
               : `额外关怀参考${yuan(extra)}元，岗位额外额度上限${yuan(config.caps[input.role])}元。需实际确认采用关怀方案后，再使用对应用户话术。`,

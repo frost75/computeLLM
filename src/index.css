@@ -965,3 +965,75 @@ button:disabled {
     align-items: stretch;
   }
 }
+.permission-options {
+  margin: 18px 0;
+  padding: 18px;
+  border: 1px solid #d5dfea;
+  border-radius: 12px;
+  background: #f7f9fc;
+}
+.permission-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.permission-heading h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.permission-heading > span {
+  color: #536879;
+  font-size: 13px;
+}
+.permission-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.permission-card {
+  padding: 16px;
+  border: 1px solid #dce4ed;
+  border-radius: 10px;
+  background: #fff;
+}
+.permission-card.selected {
+  border-color: #729eac;
+  box-shadow: inset 0 3px #729eac;
+}
+.permission-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+.permission-label > span {
+  font-size: 11px;
+  color: #306c7e;
+  background: #eaf3f6;
+  padding: 3px 7px;
+  border-radius: 6px;
+}
+.permission-card p {
+  font-size: 14px;
+  margin: 12px 0;
+}
+.permission-card p strong {
+  font-size: 23px;
+  color: #24596a;
+  margin-left: 6px;
+}
+.permission-card p b {
+  margin-left: 6px;
+}
+.permission-card button {
+  font-size: 13px;
+}
+@media (max-width: 600px) {
+  .permission-grid {
+    grid-template-columns: 1fr;
+  }
+}

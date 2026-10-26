@@ -364,9 +364,62 @@ export default function Workbench() {
               </div>
               <p className="hint">
                 {snapshot.platform === "jd"
-                  ? "仅计算商家承担的优惠差额，平台承担部分不退。"
+                  ? "可退差价为规则内金额；额外权限单独展示，不自动计入默认用户话术。"
                   : "额外关怀及合计供客服评估方案，需确认采用后再告知用户。"}
               </p>
+              {result.permissions && (
+                <section
+                  className="permission-options"
+                  aria-label="额外权限方案"
+                >
+                  <div className="permission-heading">
+                    <h3>额外权限方案</h3>
+                    <span>未补足差额 ¥{yuan(result.permissions.gap)}</span>
+                  </div>
+                  <p className="hint">
+                    {result.permissions.gap > 0
+                      ? "支出差额超过规则内退差，超出部分可按岗位上限提供额外补偿。确认采用后，再复制对应方案话术。"
+                      : "支出差额未超过规则内退差，没有可追加的额外差额。"}
+                  </p>
+                  <div className="permission-grid">
+                    {(["member", "leader"] as const).map((role) => {
+                      const option = result.permissions![role];
+                      return (
+                        <article
+                          key={role}
+                          className={`permission-card ${snapshot.role === role ? "selected" : ""}`}
+                        >
+                          <div className="permission-label">
+                            <strong>
+                              {role === "member"
+                                ? "组员 · 最高50元"
+                                : "组长 · 最高80元"}
+                            </strong>
+                            {snapshot.role === role && <span>当前岗位</span>}
+                          </div>
+                          <p>
+                            额外可补 <b>¥{yuan(option.extra)}</b>
+                          </p>
+                          <p>
+                            含退差合计 <strong>¥{yuan(option.total)}</strong>
+                          </p>
+                          <button
+                            type="button"
+                            disabled={option.extra <= 0}
+                            onClick={() =>
+                              void navigator.clipboard
+                                .writeText(option.customerText)
+                                .catch(() => setError("复制失败，请重试"))
+                            }
+                          >
+                            复制{role === "member" ? "组员" : "组长"}方案话术
+                          </button>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
               <div className="customer">
                 <strong>可发送给用户</strong>
                 <p>{result.customerText}</p>

@@ -120,6 +120,11 @@ export interface Result {
   total: number | null;
   customerText: string;
   careText: string | null;
+  permissions?: {
+    gap: number;
+    member: { extra: number; total: number; customerText: string };
+    leader: { extra: number; total: number; customerText: string };
+  };
   internal: string[];
   basis: Record<string, number | null>;
 }
