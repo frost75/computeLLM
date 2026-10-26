@@ -24,6 +24,8 @@ const aliases: [RegExp, Discount["category"]][] = [
 ];
 export const refundLabel = (label: string) =>
   /价保|保价|费用项[加价][宝宝保]|已退差|退差退款/.test(label);
+export const platformRedPacket = (name: string, platform: string) =>
+  platform === "jd" && /红包/.test(name.replace(/\s/g, ""));
 // 支出项目的身份由业务口径决定，不能随模型建议的承担方变化。
 export const spendingField = (name: string): Field | null =>
   /E\s*卡|e\s*卡/.test(name)
@@ -38,6 +40,15 @@ export const spendingField = (name: string): Field | null =>
             ? "tradeInSubsidy"
             : null;
 export function normalizeDiscount(line: Discount, platform: string): Discount {
+  if (platformRedPacket(line.name, platform))
+    return {
+      ...line,
+      category: "otherDiscount",
+      payer: "platform",
+      payerSource: "evidence",
+      confidence: 1,
+      payerReason: "固定业务规则：红包统一由平台承担，无需AI判断或人工切换",
+    };
   const category = classify(line.name, line.category, platform);
   if (
     platform === "jd" &&

@@ -1,8 +1,14 @@
 import type { Field, OrderInput, Snapshot } from "./contracts";
 import { money, nonnegative } from "./money";
-import { spendingField, classify } from "./automation";
+import {
+  spendingField,
+  classify,
+  normalizeDiscount,
+  platformRedPacket,
+} from "./automation";
 
 export const governmentLine = (name: string, category: string) =>
+  !platformRedPacket(name, "jd") &&
   ["governmentSubsidy", "nationalSubsidy"].includes(
     classify(name, category as never, "jd"),
   );
@@ -210,6 +216,16 @@ export function materializeOrder(order: OrderInput): OrderInput {
 export function materializeSnapshot(snapshot: Snapshot): Snapshot {
   if (snapshot.platform !== "jd") return snapshot;
   const materialize = (order: OrderInput) => {
+    const rows = order.discounts ?? order.recognition?.discounts;
+    if (rows?.some((row) => platformRedPacket(row.name, "jd")))
+      order = {
+        ...order,
+        discounts: rows.map((row) =>
+          platformRedPacket(row.name, "jd")
+            ? normalizeDiscount(row, "jd")
+            : row,
+        ),
+      };
     try {
       return materializeOrder(order);
     } catch {

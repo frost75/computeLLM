@@ -14,7 +14,11 @@ import {
   governmentLine,
   isSubsidyLocked,
 } from "../domain/settlement";
-import { couponLine, normalizeDiscount } from "../domain/automation";
+import {
+  couponLine,
+  normalizeDiscount,
+  platformRedPacket,
+} from "../domain/automation";
 import { yuan, money } from "../domain/money";
 import { repository } from "../services/cases";
 export default function OrderPanel({
@@ -414,7 +418,11 @@ export default function OrderPanel({
                         }
                       />
                     </label>
-                    {platform === "jd" || couponLine(row) ? (
+                    {platformRedPacket(row.name, platform) ? (
+                      <span className="payer-label" title={row.payerReason}>
+                        平台承担 · 固定规则
+                      </span>
+                    ) : platform === "jd" || couponLine(row) ? (
                       <div
                         className="payer-toggle"
                         aria-label={`${row.name}承担方`}
